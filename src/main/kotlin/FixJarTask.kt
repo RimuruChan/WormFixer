@@ -2,13 +2,10 @@ package com.github.rimuruchan
 
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
-import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.util.jar.JarEntry
 import java.util.jar.JarFile
 import java.util.jar.JarOutputStream
+import java.util.zip.ZipEntry
 
 class FixJarTask(
     private val jarFile: JarFile,
@@ -16,65 +13,60 @@ class FixJarTask(
 ) : Runnable {
 
     override fun run() {
-        try {
-            println("Processing ${target.absolutePath}")
-            val repaired = File(target.absolutePath + ".0")
-            if (repaired.exists()) repaired.delete()
-            repaired.createNewFile()
-            repaired.deleteOnExit()
-            JarOutputStream(FileOutputStream(repaired)).use { jos ->
-                val entryIter = jarFile.entries()
-                while (entryIter.hasMoreElements()) {
-                    val je = entryIter.nextElement()
-                    val newJe = JarEntry(je.name).apply {
-                        comment = je.comment
-                        extra = je.extra
-                    }
+        runCatching {
+            var modified = false
+
+            val repaired = File(target.absolutePath + ".0").apply {
+                if (exists()) delete()
+                createNewFile()
+                deleteOnExit()
+            }
+
+            JarOutputStream(repaired.outputStream()).use { jos ->
+                jarFile.entries().asSequence().forEach { je ->
+                    val newJe = je.clone() as ZipEntry
                     val entryName = je.name
                     if (entryName.startsWith("javassist/") ||
                         entryName.endsWith("L10.class") ||
                         entryName == ".l_ignore" ||
                         entryName == ".l1"
-                    ) continue
-                    if (je.isDirectory || !entryName.endsWith(
-                            ".class"
-                        ) || !Regex(".*module-info\\.class").matches(entryName)
-                    ) {
-                        jos.putNextEntry(newJe)
-                        jarFile.getInputStream(je).use { `is` ->
-                            `is`.copyTo(jos)
-                        }
+                    ) return@forEach
+
+                    jos.putNextEntry(newJe)
+                    if (je.isDirectory || !entryName.endsWith(".class")) {
+                        jos.write(jarFile.getInputStream(je).readBytes())
                         jos.closeEntry()
-                    } else {
-                        var modifiedClassBytes: ByteArray
-                        try {
-                            jarFile.getInputStream(je).use { `is` ->
-                                val cr = ClassReader(`is`)
-                                val cw = ClassWriter(cr, 0)
-                                cr.accept(ClassTransformer(cw), 0)
-                                modifiedClassBytes = cw.toByteArray()
-                                jos.putNextEntry(newJe)
-                            }
-                        } catch (e: Throwable) {
-                            println("Failed to modify $entryName in ${target.absolutePath}:\n${e.stackTraceToString()}")
-                            jarFile.getInputStream(je).use { `is` ->
-                                val os = ByteArrayOutputStream()
-                                `is`.copyTo(os)
-                                modifiedClassBytes = os.toByteArray()
-                            }
-                        }
-                        jos.write(modifiedClassBytes)
-                        jos.closeEntry()
+                        return@forEach
                     }
+
+                    var classBytes: ByteArray = jarFile.getInputStream(je).readBytes()
+                    runCatching {
+                        val cr = ClassReader(classBytes)
+                        val cw = ClassWriter(cr, 0)
+                        val tr = ClassTransformer(cw)
+                        cr.accept(tr, 0)
+                        if (tr.isModified) {
+                            modified = true
+                            classBytes = cw.toByteArray()
+                            println("Detected worm in $entryName in ${target.absolutePath}, repaired.")
+                        }
+                    }.onFailure {
+                        println("Failed to modify $entryName in ${target.absolutePath}: ${it.message}")
+                    }
+                    jos.write(classBytes)
+                    jos.closeEntry()
                 }
             }
-            FileOutputStream(target).use { fos ->
-                FileInputStream(repaired).use { fis ->
-                    fis.copyTo(fos)
-                }
+            jarFile.close()
+            if (modified) {
+                target.delete()
+                repaired.renameTo(target)
+                println("Repaired ${target.absolutePath}.")
+            } else {
+                repaired.delete()
             }
-        } catch (e: Throwable) {
-            println("Failed to repair ${target.absolutePath}:\n${e.stackTraceToString()}")
+        }.onFailure {
+            println("Failed to repair ${target.absolutePath}: ${it.message}")
         }
     }
 }

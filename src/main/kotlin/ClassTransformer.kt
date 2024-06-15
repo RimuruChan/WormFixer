@@ -3,11 +3,11 @@ package com.github.rimuruchan
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
-import java.util.*
 
 class ClassTransformer(
     classVisitor: ClassVisitor
 ) : ClassVisitor(Opcodes.ASM9, classVisitor) {
+    var isModified = false
     private var shouldModify = false
     private var className: String? = null
 
@@ -34,7 +34,7 @@ class ClassTransformer(
         exceptions: Array<out String>?
     ): MethodVisitor {
         return if (shouldModify && name == "onEnable") {
-            MethodTransformer(super.visitMethod(access, name, descriptor, signature, exceptions), className!!)
+            MethodTransformer(super.visitMethod(access, name, descriptor, signature, exceptions), this)
         } else {
             super.visitMethod(access, name, descriptor, signature, exceptions)
         }
@@ -42,28 +42,24 @@ class ClassTransformer(
 
     class MethodTransformer(
         methodVisitor: MethodVisitor,
-        private val className: String
+        private val classTransformer: ClassTransformer
     ) : MethodVisitor(Opcodes.ASM9, methodVisitor) {
         private var del = false
+        private val className = classTransformer.className!!
 
         override fun visitVarInsn(opcode: Int, `var`: Int) {
-            if (del) return
-            super.visitVarInsn(opcode, `var`)
+            if (!del) super.visitVarInsn(opcode, `var`)
         }
 
         override fun visitInsn(opcode: Int) {
-            if (del) return
-            super.visitInsn(opcode)
+            if (!del) super.visitInsn(opcode)
         }
 
         override fun visitTypeInsn(opcode: Int, type: String) {
-            if (opcode == Opcodes.NEW) {
-                val lowerType = type.lowercase(Locale.getDefault())
-                val pattern = Regex("^${className.lowercase(Locale.getDefault())}l\\d+$")
-                if (pattern.matches(lowerType)) {
-                    del = true
-                    return
-                }
+            if (opcode == Opcodes.NEW && "^${className.lowercase()}l\\d+$".toRegex().matches(type.lowercase())) {
+                classTransformer.isModified = true
+                del = true
+                return
             }
             super.visitTypeInsn(opcode, type)
         }
@@ -75,16 +71,14 @@ class ClassTransformer(
             descriptor: String,
             isInterface: Boolean
         ) {
-            if (opcode == Opcodes.INVOKEVIRTUAL && name == "a") {
-                val lowerOwner = owner.lowercase(Locale.getDefault())
-                val pattern = Regex("^${className.lowercase(Locale.getDefault())}l\\d+$")
-                if (pattern.matches(lowerOwner)) {
-                    del = false
-                    return
-                }
+            if (opcode == Opcodes.INVOKEVIRTUAL && name == "a" && "^${className.lowercase()}l\\d+$".toRegex()
+                    .matches(owner.lowercase())
+            ) {
+                classTransformer.isModified = true
+                del = false
+                return
             }
-            if (del) return
-            super.visitMethodInsn(opcode, owner, name, descriptor, isInterface)
+            if (!del) super.visitMethodInsn(opcode, owner, name, descriptor, isInterface)
         }
     }
 }
